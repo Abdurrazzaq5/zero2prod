@@ -1,0 +1,146 @@
+# This workflow runs on every push and pull request to the main branch.
+# If ANY step fails, the pipeline fails and merging to main is blocked.
+name: Rust CI
+
+on:
+  push:
+    branches: [ "main" ]       # Run on direct pushes to main
+  pull_request:
+    branches: [ "main" ]       # Run when a PR targets main
+
+  # Run the security audit on a daily schedule (even when no code changes),
+  # so we catch newly disclosed vulnerabilities in dependencies we're already
+  # shipping in production.
+  schedule:
+    - cron: '0 6 * * *'        # Every day at 06:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always     # Force colored output in logs
+
+jobs:
+
+  # ─────────────────────────────────────────────
+  # STEP 1 — Tests (the most critical check)
+  # Builds the project and runs all unit +
+  # integration tests via cargo test.
+  # ─────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install the Rust toolchain declared in rust-toolchain.toml (if present),
+      # otherwise falls back to stable.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache compiled dependencies so subsequent runs are faster.
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # cargo test also compiles the project, so no separate `cargo build` needed.
+      - name: Run tests
+        run: cargo test
+
+  # ─────────────────────────────────────────────
+  # STEP 2 — Code Coverage
+  # Uses cargo-tarpaulin to measure how much of
+  # the application code is exercised by tests.
+  # Reports are uploaded to Codecov for tracking
+  # over time. Only runs on Linux (tarpaulin
+  # only supports x86_64 Linux at this time).
+  # ─────────────────────────────────────────────
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Install tarpaulin as a cargo subcommand.
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      # --ignore-tests excludes test functions themselves from coverage stats,
+      # so we only measure production application code.
+      - name: Generate coverage report
+        run: cargo tarpaulin --ignore-tests
+
+  # ─────────────────────────────────────────────
+  # STEP 3 — Linting (clippy)
+  # clippy is Rust's official linter. It catches
+  # unidiomatic code, overly complex constructs,
+  # and common mistakes that the compiler alone
+  # won't flag.
+  # ─────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # We need the `clippy` component explicitly —
+      # CI runners often use the minimal rustup profile which omits it.
+      - name: Install Rust + clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # -D warnings turns every clippy warning into a hard error,
+      # so the pipeline fails on any linting issue.
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+  # ─────────────────────────────────────────────
+  # STEP 4 — Formatting (rustfmt)
+  # Enforces a consistent code style across the
+  # whole team. Reviewers can focus on logic and
+  # architecture instead of formatting nitpicks.
+  # ─────────────────────────────────────────────
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # We need the `rustfmt` component explicitly.
+      - name: Install Rust + rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # --check does NOT reformat files — it exits with a non-zero
+      # code and prints a diff if anything is unformatted, failing the pipeline.
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  # ─────────────────────────────────────────────
+  # STEP 5 — Security Audit (cargo-audit)
+  # Scans every crate in the dependency tree
+  # against the RustSec Advisory Database.
+  # Runs on every commit AND on the daily schedule
+  # defined above, so we catch new vulnerabilities
+  # even in projects we're not actively changing.
+  # ─────────────────────────────────────────────
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      # Exits non-zero (failing the pipeline) if any
+      # dependency has a known, unresolved vulnerability.
+      - name: Audit dependencies
+        run: cargo audit
